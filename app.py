@@ -1,6 +1,7 @@
 import flet as ft
 import fitz  # PyMuPDF
 import os
+import base64
 
 
 # ──────────────────────────────────────────────
@@ -13,7 +14,29 @@ TEXT     = "#212121"
 SUBTEXT  = "#757575"
 BORDER   = "#E0E0E0"
 
+THUMB_W = 90
+THUMB_H = 120
 
+
+def render_thumbnail(doc, page_idx: int) -> str:
+    """PDF 특정 페이지를 base64 PNG 문자열로 반환."""
+    pg   = doc[page_idx]
+    zoom = THUMB_W / pg.rect.width
+    mat  = fitz.Matrix(zoom, zoom)
+    pix  = pg.get_pixmap(matrix=mat, alpha=False)
+    return base64.b64encode(pix.tobytes("png")).decode()
+ 
+ 
+def thumb_image(b64: str):
+    return ft.Image(
+        src_base64=b64,
+        width=THUMB_W,
+        height=THUMB_H,
+        fit="contain",
+        border_radius=6,
+    )
+    
+    
 def card(content, padding=24, width=None):
     return ft.Container(
         content=content,
@@ -118,26 +141,37 @@ def build_rotate(page: ft.Page, go):
         pages_col.controls.append(ft.Container(height=8))
         for i in range(len(doc)):
             cur = doc[i].rotation
+            b64 = render_thumbnail(doc, i)
+            
             row = ft.Row([
                 ft.Container(
-                    ft.Text(f"Page {i+1}", size=13, color=TEXT, weight="bold"),
-                    bgcolor="#F5F5F5", border_radius=8, padding=ft.padding.symmetric(8, 14),
-                    width=90,
+                    thumb_image(b64),
+                    border = ft.border.all(1, BORDER),
+                    border_radius=6,
                 ),
-                ft.Text(f"현재 회전: {cur}°", size=12, color=SUBTEXT, expand=True),
-                ft.IconButton(
-                    icon=ft.Icons.ROTATE_LEFT,
-                    tooltip="왼쪽 90°",
-                    icon_color=ACCENT,
-                    on_click=lambda _, idx=i: rotate_page(idx, -90),
-                ),
-                ft.IconButton(
-                    icon=ft.Icons.ROTATE_RIGHT,
-                    tooltip="오른쪽 90°",
-                    icon_color=ACCENT,
-                    on_click=lambda _, idx=i: rotate_page(idx, 90),
-                ),
+                ft.Container(width=16),
+                ft.Column([
+                    ft.Text(f"Page {i+1}", size=14, color=TEXT, weight="bold"),
+                    ft.Text(f"현재 회전: {cur}°", size=12, color=SUBTEXT),
+                    ft.Container(height=8),
+                    ft.Row([
+                        ft.IconButton(
+                            icon=ft.Icons.ROTATE_LEFT,
+                            tooltip="왼쪽 90°",
+                            icon_color=ACCENT,
+                            on_click=lambda _, idx=i: rotate_page(idx, -90),
+                        ),
+                        ft.Text("회전", size=12, color=SUBTEXT),
+                        ft.IconButton(
+                            icon=ft.Icons.ROTATE_RIGHT,
+                            tooltip="오른쪽 90°",
+                            icon_color=ACCENT,
+                            on_click=lambda _, idx=i: rotate_page(idx, 90),
+                        ),
+                    ], vertical_alignment="center", spacing=0),
+                ], spacing=2),
             ], vertical_alignment="center")
+            
             pages_col.controls.append(
                 ft.Container(row, bgcolor=CARD_BG, border_radius=10,
                              padding=ft.padding.symmetric(8, 12),
@@ -204,9 +238,7 @@ def build_rotate(page: ft.Page, go):
             ]),
         ])),
         ft.Container(height=16),
-        card(ft.Column([
-            pages_col,
-        ])),
+        card(pages_col),
         ft.Container(height=16),
         ft.Row([
             ft.ElevatedButton(
@@ -226,15 +258,16 @@ def build_rotate(page: ft.Page, go):
 #  페이지: 페이지 재배열 / 삭제
 # ──────────────────────────────────────────────
 def build_reorder(page: ft.Page, go):
-    state = {"path": None, "name": None, "total": 0, "order": []}
+    state = {"path": None, "name": None, "doc": None, "order": []}
     status    = ft.Text("PDF 파일을 선택해주세요.", color=SUBTEXT, size=13)
-    pages_col = ft.Column(spacing=8, scroll="auto")
+    pages_col = ft.Column(spacing=12, scroll="auto")
     result_text = ft.Text("", color="#43A047", size=13, weight="bold")
 
     def refresh_list():
         pages_col.controls.clear()
+        doc   = state["doc"]
         order = state["order"]
-        if not order:
+        if not doc or not order:
             page.update()
             return
         pages_col.controls.append(
@@ -242,36 +275,44 @@ def build_reorder(page: ft.Page, go):
         )
         pages_col.controls.append(ft.Container(height=8))
         for pos, pg_idx in enumerate(order):
-            pos_ = pos  # closure
+            b64 = render_thumbnail(doc, pg_idx)
 
-            def move_up(_, p=pos_):
+            def move_up(_, p=pos):
                 if p > 0:
                     state["order"][p], state["order"][p-1] = state["order"][p-1], state["order"][p]
                     refresh_list()
 
-            def move_down(_, p=pos_):
+            def move_down(_, p=pos):
                 if p < len(state["order"]) - 1:
                     state["order"][p], state["order"][p+1] = state["order"][p+1], state["order"][p]
                     refresh_list()
 
-            def delete(_, p=pos_):
+            def delete(_, p=pos):
                 state["order"].pop(p)
                 refresh_list()
 
             row = ft.Row([
                 ft.Container(
-                    ft.Text(f"Page {pg_idx+1}", size=13, color=TEXT, weight="bold"),
-                    bgcolor="#F5F5F5", border_radius=8,
-                    padding=ft.padding.symmetric(8, 14), width=90,
+                    thumb_image(b64),
+                    border=ft.border.all(1, BORDER),
+                    border_radius=6,
                 ),
-                ft.Text(f"→ {pos+1}번째", size=12, color=SUBTEXT, expand=True),
-                ft.IconButton(ft.Icons.ARROW_UPWARD,   tooltip="위로", icon_color="#1E88E5", on_click=move_up),
-                ft.IconButton(ft.Icons.ARROW_DOWNWARD, tooltip="아래로", icon_color="#1E88E5", on_click=move_down),
-                ft.IconButton(ft.Icons.DELETE_OUTLINE,  tooltip="삭제", icon_color=ACCENT, on_click=delete),
+                ft.Container(width=16),
+                ft.Column([
+                    ft.Text(f"원본 Page {pg_idx+1}", size=14, color=TEXT, weight="bold"),
+                    ft.Text(f"→ {pos+1}번째로 배치", size=12, color=SUBTEXT),
+                    ft.Container(height=8),
+                    ft.Row([
+                        ft.IconButton(ft.Icons.ARROW_UPWARD,   tooltip="위로", icon_color="#1E88E5", on_click=move_up),
+                        ft.IconButton(ft.Icons.ARROW_DOWNWARD, tooltip="아래로", icon_color="#1E88E5", on_click=move_down),
+                        ft.IconButton(ft.Icons.DELETE_OUTLINE,  tooltip="삭제", icon_color=ACCENT, on_click=delete),
+                    ], spacing=0),
+                ], spacing=2),
             ], vertical_alignment="center")
+            
             pages_col.controls.append(
                 ft.Container(row, bgcolor=CARD_BG, border_radius=10,
-                             padding=ft.padding.symmetric(8, 12),
+                             padding=ft.padding.symmetric(10, 14),
                              border=ft.border.all(1, BORDER))
             )
         page.update()
@@ -282,9 +323,8 @@ def build_reorder(page: ft.Page, go):
             doc = fitz.open(f.path)
             state["path"]  = f.path
             state["name"]  = f.name
-            state["total"] = len(doc)
+            state["doc"]   = doc
             state["order"] = list(range(len(doc)))
-            doc.close()
             status.value = f"📄 {f.name}"
             status.color = TEXT
             result_text.value = ""
@@ -299,7 +339,7 @@ def build_reorder(page: ft.Page, go):
     def save(e):
         if not state["path"] or not state["order"]:
             return
-        src = fitz.open(state["path"])
+        src     = fitz.open(state["path"])
         out_doc = fitz.open()
         for idx in state["order"]:
             out_doc.insert_pdf(src, from_page=idx, to_page=idx)
@@ -356,8 +396,8 @@ def build_reorder(page: ft.Page, go):
 #  페이지: PDF 병합
 # ──────────────────────────────────────────────
 def build_merge(page: ft.Page, go):
-    files_list = []   # [{"path": ..., "name": ...}]
-    files_col  = ft.Column(spacing=8, scroll="auto")
+    files_list  = []   # [{"path": ..., "name": ..., "thumb_b64": ...}]
+    files_col   = ft.Column(spacing=12, scroll="auto")
     result_text = ft.Text("", color="#43A047", size=13, weight="bold")
 
     def refresh_list():
@@ -372,20 +412,19 @@ def build_merge(page: ft.Page, go):
             section_title(f"선택된 파일 ({len(files_list)}개) — 순서 변경 가능")
         )
         files_col.controls.append(ft.Container(height=8))
+        
         for i, f in enumerate(files_list):
-            i_ = i
-
-            def move_up(_, idx=i_):
+            def move_up(_, idx=i):
                 if idx > 0:
                     files_list[idx], files_list[idx-1] = files_list[idx-1], files_list[idx]
                     refresh_list()
 
-            def move_down(_, idx=i_):
+            def move_down(_, idx=i):
                 if idx < len(files_list) - 1:
                     files_list[idx], files_list[idx+1] = files_list[idx+1], files_list[idx]
                     refresh_list()
 
-            def remove(_, idx=i_):
+            def remove(_, idx=i):
                 files_list.pop(idx)
                 refresh_list()
 
@@ -393,17 +432,31 @@ def build_merge(page: ft.Page, go):
                 ft.Container(
                     ft.Text(f"{i+1}", size=13, color="#FFFFFF", weight="bold"),
                     bgcolor="#43A047", border_radius=8,
-                    padding=ft.padding.symmetric(8, 14), width=36,
+                    width=28, height=28,
                     alignment=ft.alignment.center,
                 ),
-                ft.Text(f["name"], size=13, color=TEXT, expand=True),
-                ft.IconButton(ft.Icons.ARROW_UPWARD,   tooltip="위로", icon_color="#43A047", on_click=move_up),
-                ft.IconButton(ft.Icons.ARROW_DOWNWARD, tooltip="아래로", icon_color="#43A047", on_click=move_down),
-                ft.IconButton(ft.Icons.DELETE_OUTLINE,  tooltip="제거", icon_color=ACCENT, on_click=remove),
+                ft.Container(width=12),
+                ft.Container(
+                    thumb_image(f["thumb_b64"]),
+                    border=ft.border.all(1, BORDER),
+                    border_radius=6,
+                ),
+                ft.Container(width=16),
+                ft.Column([
+                    ft.Text(f["name"], size=13, color=TEXT, weight="bold"),
+                    ft.Text("1페이지 미리보기", size=11, color=SUBTEXT),
+                    ft.Container(height=8),
+                    ft.Row([
+                        ft.IconButton(ft.Icons.ARROW_UPWARD,   tooltip="위로", icon_color="#43A047", on_click=move_up),
+                        ft.IconButton(ft.Icons.ARROW_DOWNWARD, tooltip="아래로", icon_color="#43A047", on_click=move_down),
+                        ft.IconButton(ft.Icons.DELETE_OUTLINE,  tooltip="제거", icon_color=ACCENT, on_click=remove),
+                    ], spacing=0),
+                ], spacing=2, expand=True),                
             ], vertical_alignment="center")
+            
             files_col.controls.append(
                 ft.Container(row, bgcolor=CARD_BG, border_radius=10,
-                             padding=ft.padding.symmetric(8, 12),
+                             padding=ft.padding.symmetric(10, 14),
                              border=ft.border.all(1, BORDER))
             )
         page.update()
@@ -413,7 +466,10 @@ def build_merge(page: ft.Page, go):
             for f in e.files:
                 # 중복 방지
                 if not any(x["path"] == f.path for x in files_list):
-                    files_list.append({"path": f.path, "name": f.name})
+                    doc = fitz.open(f.path)
+                    b64 = render_thumbnail(doc, 0)
+                    doc.close()
+                    files_list.append({"path": f.path, "name": f.name, "thumb_b64": b64})
             result_text.value = ""
             refresh_list()
         page.update()
@@ -482,11 +538,11 @@ def build_merge(page: ft.Page, go):
 #  라우터 + 앱 진입점
 # ──────────────────────────────────────────────
 def main(page: ft.Page):
-    page.title        = "PDF 편집기"
-    page.bgcolor      = BG
-    page.padding      = ft.padding.symmetric(horizontal=40, vertical=20)
-    page.window.width  = 820
-    page.window.height = 680
+    page.title         = "PDF 편집기"
+    page.bgcolor       = BG
+    page.padding       = ft.padding.symmetric(horizontal=40, vertical=20)
+    page.window.width  = 860
+    page.window.height = 720
 
     content = ft.Column(expand=True, scroll="auto")
 
