@@ -70,6 +70,72 @@ def file_button(label, color, on_click, icon=ft.Icons.UPLOAD_FILE):
 
     
 # ──────────────────────────────────────────────
+#  파일명 저장 다이얼로그 (공통)
+#
+#  show_save_dialog(page, default_name, dir_path, on_confirm)
+#    - default_name : 확장자 없는 기본 파일명  ex) "document_rotated"
+#    - dir_path     : 저장 폴더 경로
+#    - on_confirm(full_path) : 사용자가 확인 눌렀을 때 콜백
+# ──────────────────────────────────────────────
+def show_save_dialog(page: ft.Page, default_name: str, dir_path: str, on_confirm):
+    name_field = ft.TextField(
+        value=default_name,
+        label="파일 이름",
+        suffix_text=".pdf",
+        autofocus=True,
+        border_color=ACCENT,
+        focused_border_color=ACCENT,
+        expand=True,
+    )
+    error_text = ft.Text("", color=ACCENT, size=12)
+ 
+    def confirm(e):
+        raw = name_field.value.strip()
+        if not raw:
+            error_text.value = "파일 이름을 입력해주세요."
+            page.update()
+            return
+        # 사용 불가 문자 체크
+        invalid = set(r'\/:*?"<>|')
+        if any(c in invalid for c in raw):
+            error_text.value = '사용 불가 문자: \\ / : * ? " < > |'
+            page.update()
+            return
+        full_path = os.path.join(dir_path, raw + ".pdf")
+        dlg.open = False
+        page.update()
+        on_confirm(full_path)
+ 
+    def cancel(e):
+        dlg.open = False
+        page.update()
+ 
+    dlg = ft.AlertDialog(
+        modal=True,
+        title=ft.Text("저장 파일명 입력", weight="bold"),
+        content=ft.Column([
+            ft.Text("저장할 파일 이름을 입력하세요.\n(.pdf 는 자동으로 붙습니다)",
+                    size=13, color=SUBTEXT),
+            ft.Container(height=12),
+            ft.Row([name_field]),
+            error_text,
+            ft.Container(height=4),
+            ft.Text(f"📁 {dir_path}", size=11, color=SUBTEXT),
+        ], tight=True, width=400),
+        actions=[
+            ft.TextButton("취소", on_click=cancel,
+                          style=ft.ButtonStyle(color=SUBTEXT)),
+            ft.ElevatedButton("저장", on_click=confirm,
+                               style=ft.ButtonStyle(bgcolor=ACCENT, color="#FFFFFF")),
+        ],
+        actions_alignment="end",
+    )
+    page.overlay.append(dlg)
+    dlg.open = True
+    page.update()
+    
+    
+# ──────────────────────────────────────────────
 #  페이지: 메인 홈
 # ──────────────────────────────────────────────
 def build_home(page: ft.Page, go):
@@ -252,13 +318,23 @@ def build_rotate(page: ft.Page, go):
         doc = state["doc"]
         if not doc:
             return
-        base, ext = os.path.splitext(state["path"])
-        out = base + "_rotated" + ext
-        doc.save(out)
-        result_text.value = f"✅ 저장 완료: {os.path.basename(out)}"
-        result_text.color = "#43A047"
-        with _ui_lock:
-            page.update()
+        # 기본 파일명: 원본명_rotated
+        base = os.path.splitext(state["name"])[0]
+        default = base + "_rotated"
+        dir_path = os.path.dirname(state["path"])
+        
+        def do_save(full_path):
+            try:
+                doc.save(full_path)
+                result_text.value = f"✅ 저장 완료: {os.path.basename(full_path)}"
+                result_text.color = "#43A047"
+            except Exception as ex:
+                result_text.value = f"❌ 저장 실패: {ex}"
+                result_text.color = ACCENT
+            with _ui_lock:
+                page.update()
+ 
+        show_save_dialog(page, default, dir_path, do_save)
 
     return ft.Column([
         ft.Container(height=8),
@@ -406,19 +482,28 @@ def build_reorder(page: ft.Page, go):
     def save(e):
         if not state["path"] or not state["order"]:
             return
-        src     = fitz.open(state["path"])
-        out_doc = fitz.open()
-        for idx in state["order"]:
-            out_doc.insert_pdf(src, from_page=idx, to_page=idx)
-        src.close()
-        base, ext = os.path.splitext(state["path"])
-        out_path = base + "_reordered" + ext
-        out_doc.save(out_path)
-        out_doc.close()
-        result_text.value = f"✅ 저장 완료: {os.path.basename(out_path)}"
-        result_text.color = "#43A047"
-        with _ui_lock:
-            page.update()
+        base     = os.path.splitext(state["name"])[0]
+        default  = base + "_reordered"
+        dir_path = os.path.dirname(state["path"])
+ 
+        def do_save(full_path):
+            try:
+                src     = fitz.open(state["path"])
+                out_doc = fitz.open()
+                for idx in state["order"]:
+                    out_doc.insert_pdf(src, from_page=idx, to_page=idx)
+                src.close()
+                out_doc.save(full_path)
+                out_doc.close()
+                result_text.value = f"✅ 저장 완료: {os.path.basename(full_path)}"
+                result_text.color = "#43A047"
+            except Exception as ex:
+                result_text.value = f"❌ 저장 실패: {ex}"
+                result_text.color = ACCENT
+            with _ui_lock:
+                page.update()
+ 
+        show_save_dialog(page, default, dir_path, do_save)
 
     return ft.Column([
         ft.Container(height=8),
@@ -562,19 +647,27 @@ def build_merge(page: ft.Page, go):
             with _ui_lock:
                 page.update()
             return
-        out_doc = fitz.open()
-        for f in files_list:
-            src = fitz.open(f["path"])
-            out_doc.insert_pdf(src)
-            src.close()
-        first_dir  = os.path.dirname(files_list[0]["path"])
-        out_path   = os.path.join(first_dir, "merged_output.pdf")
-        out_doc.save(out_path)
-        out_doc.close()
-        result_text.value = f"✅ 저장 완료: {out_path}"
-        result_text.color = "#43A047"
-        with _ui_lock:
-            page.update()
+        default  = "merged_output"
+        dir_path = os.path.dirname(files_list[0]["path"])
+ 
+        def do_save(full_path):
+            try:
+                out_doc = fitz.open()
+                for f in files_list:
+                    src = fitz.open(f["path"])
+                    out_doc.insert_pdf(src)
+                    src.close()
+                out_doc.save(full_path)
+                out_doc.close()
+                result_text.value = f"✅ 저장 완료: {os.path.basename(full_path)}"
+                result_text.color = "#43A047"
+            except Exception as ex:
+                result_text.value = f"❌ 저장 실패: {ex}"
+                result_text.color = ACCENT
+            with _ui_lock:
+                page.update()
+ 
+        show_save_dialog(page, default, dir_path, do_save)
 
     return ft.Column([
         ft.Container(height=8),
