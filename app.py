@@ -18,7 +18,13 @@ BORDER   = "#E0E0E0"
 THUMB_W = 90
 THUMB_H = 120
 
+# 전역 UI 락 — page.update() / slot.update() 동시 호출 방지
+_ui_lock = threading.Lock()
 
+
+# ──────────────────────────────────────────────
+#  썸네일 유틸
+# ──────────────────────────────────────────────
 def render_thumbnail(doc, page_idx: int) -> str:
     """PDF 특정 페이지를 base64 PNG 문자열로 반환."""
     pg   = doc[page_idx]
@@ -26,7 +32,6 @@ def render_thumbnail(doc, page_idx: int) -> str:
     mat  = fitz.Matrix(zoom, zoom)
     pix  = pg.get_pixmap(matrix=mat, alpha=False)
     return base64.b64encode(pix.tobytes("png")).decode()
-
 
 def placeholder_container():
     """썸네일 로딩 전 회색 플레이스홀더."""
@@ -38,21 +43,6 @@ def placeholder_container():
         border_radius=6,
         alignment=ft.alignment.center,
         border=ft.border.all(1, BORDER),
-    )
-    
- 
-def loaded_thumb_container(b64: str):
-    """base64 PNG를 감싼 컨테이너."""
-    return ft.Image(
-        content=ft.Image(
-            src_base64=b64,
-            width=THUMB_W,
-            height=THUMB_H,
-            fit="contain",
-            border_radius=6,
-        ),
-        border=ft.border.all(1, BORDER),
-        border_radius=6,
     )
     
     
@@ -69,17 +59,14 @@ def card(content, padding=24, width=None):
         shadow=ft.BoxShadow(blur_radius=12, color="#1A000000", offset=ft.Offset(0, 3)),
     )
 
-
 def section_title(text):
     return ft.Text(text, size=13, weight="bold", color=SUBTEXT)
-
 
 def file_button(label, color, on_click, icon=ft.Icons.UPLOAD_FILE):
     return ft.ElevatedButton(
         label, icon=icon, on_click=on_click,
         style=ft.ButtonStyle(bgcolor=color, color="#FFFFFF"),
     )
-    
 
     
 # ──────────────────────────────────────────────
@@ -153,22 +140,20 @@ def build_home(page: ft.Page, go):
 # ──────────────────────────────────────────────
 def build_rotate(page: ft.Page, go):
     state = {"path": None, "name": None, "doc": None}
-    cancel_flag = {"cancel": False, "gen": 0}  # gen: 세대 번호로 stale 업데이트 방지
+    gen_box = {"gen": 0}   # 리스트/딕셔너리로 감싸야 클로저에서 변경 가능
     status = ft.Text("PDF 파일을 선택해주세요.", color=SUBTEXT, size=13)
     pages_col = ft.Column(spacing=12, scroll="auto")
     result_text = ft.Text("", color="#43A047", size=13, weight="bold")
 
     def build_page_list(doc):
-        """플레이스홀더로 즉시 렌더링 후 지연 로딩 시작."""
-        # 1) 이전 스레드 중단 표시
-        cancel_flag["cancel"] = True
-        cancel_flag["gen"]   += 1
-        my_gen = cancel_flag["gen"]
+        # 1) 세대 증가 → 이전 스레드는 자연히 무시됨
+        gen_box["gen"] += 1
+        my_gen = gen_box["gen"]
         
-        # 2) 플레이스홀더로 즉시 UI 구성
-        pages_col.controls.clear()
-        pages_col.controls.append(section_title(f"총 {len(doc)}페이지 — 회전할 방향 선택"))
-        pages_col.controls.append(ft.Container(height=8))
+        # 2) 플레이스홀더로 즉시 목록 구성
+        new_controls = []
+        new_controls.append(section_title(f"총 {len(doc)}페이지 — 회전할 방향 선택"))
+        new_controls.append(ft.Container(height=8))
  
         thumb_slots = []   # (slot_container, page_idx)
         for i in range(len(doc)):
@@ -199,31 +184,38 @@ def build_rotate(page: ft.Page, go):
                 ], spacing=2),
             ], vertical_alignment="center")
  
-            pages_col.controls.append(
+            new_controls.append(
                 ft.Container(row, bgcolor=CARD_BG, border_radius=10,
                              padding=ft.padding.symmetric(10, 14),
                              border=ft.border.all(1, BORDER))
             )
  
-        page.update()
-        cancel_flag["cancel"] = False         # 새 로딩 시작
+        # 3) 락 안에서 controls 교체 + page.update() — 스레드와 동시 실행 차단
+        with _ui_lock:
+            pages_col.controls.clear()
+            pages_col.controls.extend(new_controls)
+            page.update()
         
+        # 4) 백그라운드에서 썸네일 하나씩 채우기
         def worker(gen):
             for slot, pg_idx in thumb_slots:
-                if cancel_flag["cancel"] or cancel_flag["gen"] != gen:
+                if gen_box["gen"] != gen:
                     break
                 try:
                     b64 = render_thumbnail(doc, pg_idx)
-                    # 슬롯이 아직 같은 세대일 때만 교체
-                    if cancel_flag["gen"] == gen:
-                        slot.content = ft.Image(
-                            src_base64=b64,
-                            width=THUMB_W, height=THUMB_H,
-                            fit="contain", border_radius=6,
-                        )
-                        slot.bgcolor = None
-                        slot.border  = ft.border.all(1, BORDER)
-                        slot.update()   # ← page.update() 대신 slot만 업데이트
+                    if gen_box["gen"] != gen:
+                        break
+                    with _ui_lock:
+                        # 락 안에서 slot이 여전히 페이지에 있는지 확인
+                        if gen_box["gen"] == gen:
+                            slot.content = ft.Image(
+                                src_base64=b64,
+                                width=THUMB_W, height=THUMB_H,
+                                fit="contain", border_radius=6,
+                            )
+                            slot.bgcolor = None
+                            slot.border  = ft.border.all(1, BORDER)
+                            slot.update()   # ← page.update() 대신 slot만 업데이트
                 except Exception:
                     pass
  
@@ -248,7 +240,8 @@ def build_rotate(page: ft.Page, go):
             status.color = TEXT
             result_text.value = ""
             build_page_list(state["doc"])
-        page.update()
+        with _ui_lock:
+            page.update()
 
     file_picker = ft.FilePicker()
     file_picker.on_result = on_file_result
@@ -264,7 +257,8 @@ def build_rotate(page: ft.Page, go):
         doc.save(out)
         result_text.value = f"✅ 저장 완료: {os.path.basename(out)}"
         result_text.color = "#43A047"
-        page.update()
+        with _ui_lock:
+            page.update()
 
     return ft.Column([
         ft.Container(height=8),
@@ -300,28 +294,27 @@ def build_rotate(page: ft.Page, go):
 # ──────────────────────────────────────────────
 def build_reorder(page: ft.Page, go):
     state = {"path": None, "name": None, "doc": None, "order": []}
-    cancel_flag = {"cancel": False, "gen": 0}
+    gen_box = {"gen": 0}
     status    = ft.Text("PDF 파일을 선택해주세요.", color=SUBTEXT, size=13)
     pages_col = ft.Column(spacing=12, scroll="auto")
     result_text = ft.Text("", color="#43A047", size=13, weight="bold")
 
     def refresh_list():
-        cancel_flag["cancel"] = True
-        cancel_flag["gen"]   += 1
-        my_gen = cancel_flag["gen"]
+        gen_box["gen"] += 1
+        my_gen = gen_box["gen"]
         
         doc   = state["doc"]
         order = state["order"]
-        pages_col.controls.clear()
         
         if not doc or not order:
-            page.update()
+            with _ui_lock:
+                pages_col.controls.clear()
+                page.update()
             return
         
-        pages_col.controls.append(
-            section_title(f"현재 순서 ({len(order)}페이지) — 이동·삭제 가능")
-        )
-        pages_col.controls.append(ft.Container(height=8))
+        new_controls = []
+        new_controls.append(section_title(f"현재 순서 ({len(order)}페이지) — 이동·삭제 가능"))
+        new_controls.append(ft.Container(height=8))
         
         thumb_slots = []   # (slot, original_page_idx) 순서로 수집
         for pos, pg_idx in enumerate(order):
@@ -357,31 +350,34 @@ def build_reorder(page: ft.Page, go):
                 ], spacing=2),
             ], vertical_alignment="center")
             
-            pages_col.controls.append(
+            new_controls.append(
                 ft.Container(row, bgcolor=CARD_BG, border_radius=10,
                              padding=ft.padding.symmetric(10, 14),
                              border=ft.border.all(1, BORDER))
             )
-        page.update()
-        
-        # 순서가 섞여도 올바른 페이지 썸네일을 로드
-        cancel_flag["cancel"] = False
+        with _ui_lock:
+            pages_col.controls.clear()
+            pages_col.controls.extend(new_controls)
+            page.update()
         
         def worker(gen):
             for slot, pg_idx in thumb_slots:
-                if cancel_flag["cancel"] or cancel_flag["gen"] != gen:
+                if gen_box["gen"] != gen:
                     break
                 try:
                     b64 = render_thumbnail(doc, pg_idx)
-                    if cancel_flag["gen"] == gen:
-                        slot.content = ft.Image(
-                            src_base64=b64,
-                            width=THUMB_W, height=THUMB_H,
-                            fit="contain", border_radius=6,
-                        )
-                        slot.bgcolor = None
-                        slot.border = ft.border.all(1, BORDER)
-                        slot.update()
+                    if gen_box["gen"] != gen:
+                        break
+                    with _ui_lock:
+                        if gen_box["gen"] == gen:
+                            slot.content = ft.Image(
+                                src_base64=b64,
+                                width=THUMB_W, height=THUMB_H,
+                                fit="contain", border_radius=6,
+                            )
+                            slot.bgcolor = None
+                            slot.border = ft.border.all(1, BORDER)
+                            slot.update()
                 except Exception:
                     pass
                 
@@ -399,7 +395,8 @@ def build_reorder(page: ft.Page, go):
             status.color = TEXT
             result_text.value = ""
             refresh_list()
-        page.update()
+        with _ui_lock:
+            page.update()
 
     file_picker = ft.FilePicker()
     file_picker.on_result = on_file_result
@@ -420,7 +417,8 @@ def build_reorder(page: ft.Page, go):
         out_doc.close()
         result_text.value = f"✅ 저장 완료: {os.path.basename(out_path)}"
         result_text.color = "#43A047"
-        page.update()
+        with _ui_lock:
+            page.update()
 
     return ft.Column([
         ft.Container(height=8),
@@ -461,64 +459,60 @@ def build_merge(page: ft.Page, go):
     result_text = ft.Text("", color="#43A047", size=13, weight="bold")
 
     def refresh_list():
-        files_col.controls.clear()
+        new_controls = []
         if not files_list:
-            files_col.controls.append(
-                ft.Text("아직 파일이 없어요.", color=SUBTEXT, size=13)
-            )
+            new_controls.append(ft.Text("아직 파일이 없어요.", color=SUBTEXT, size=13))
+        else:
+            new_controls.append(section_title(f"선택된 파일 ({len(files_list)}개) — 순서 변경 가능"))
+            new_controls.append(ft.Container(height=8))
+        
+            for i, f in enumerate(files_list):
+                def move_up(_, idx=i):
+                    if idx > 0:
+                        files_list[idx], files_list[idx-1] = files_list[idx-1], files_list[idx]
+                        refresh_list()
+
+                def move_down(_, idx=i):
+                    if idx < len(files_list) - 1:
+                        files_list[idx], files_list[idx+1] = files_list[idx+1], files_list[idx]
+                        refresh_list()
+
+                def remove(_, idx=i):
+                    files_list.pop(idx)
+                    refresh_list()
+
+                row = ft.Row([
+                    ft.Container(
+                        ft.Text(f"{i+1}", size=13, color="#FFFFFF", weight="bold"),
+                        bgcolor="#43A047", border_radius=8,
+                        width=28, height=28,
+                        alignment=ft.alignment.center,
+                    ),
+                    ft.Container(width=12),
+                    f["slot"],          # 썸네일 슬롯 (이미 로딩됐거나 플레이스홀더)
+                    ft.Container(width=16),
+                    ft.Column([
+                        ft.Text(f["name"], size=13, color=TEXT, weight="bold"),
+                        ft.Text("1페이지 미리보기", size=11, color=SUBTEXT),
+                        ft.Container(height=8),
+                        ft.Row([
+                            ft.IconButton(ft.Icons.ARROW_UPWARD,   tooltip="위로", icon_color="#43A047", on_click=move_up),
+                            ft.IconButton(ft.Icons.ARROW_DOWNWARD, tooltip="아래로", icon_color="#43A047", on_click=move_down),
+                            ft.IconButton(ft.Icons.DELETE_OUTLINE,  tooltip="제거", icon_color=ACCENT, on_click=remove),
+                        ], spacing=0),
+                    ], spacing=2, expand=True),                
+                ], vertical_alignment="center")
+                
+                new_controls.append(
+                    ft.Container(row, bgcolor=CARD_BG, border_radius=10,
+                                padding=ft.padding.symmetric(10, 14),
+                                border=ft.border.all(1, BORDER))
+                )
+            
+        with _ui_lock:
+            files_col.controls.clear()
+            files_col.controls.extend(new_controls)
             page.update()
-            return
-        
-        files_col.controls.append(
-            section_title(f"선택된 파일 ({len(files_list)}개) — 순서 변경 가능")
-        )
-        
-        files_col.controls.append(ft.Container(height=8))
-        
-        for i, f in enumerate(files_list):
-            def move_up(_, idx=i):
-                if idx > 0:
-                    files_list[idx], files_list[idx-1] = files_list[idx-1], files_list[idx]
-                    refresh_list()
-
-            def move_down(_, idx=i):
-                if idx < len(files_list) - 1:
-                    files_list[idx], files_list[idx+1] = files_list[idx+1], files_list[idx]
-                    refresh_list()
-
-            def remove(_, idx=i):
-                files_list.pop(idx)
-                refresh_list()
-
-            row = ft.Row([
-                ft.Container(
-                    ft.Text(f"{i+1}", size=13, color="#FFFFFF", weight="bold"),
-                    bgcolor="#43A047", border_radius=8,
-                    width=28, height=28,
-                    alignment=ft.alignment.center,
-                ),
-                ft.Container(width=12),
-                f["slot"],          # 썸네일 슬롯 (이미 로딩됐거나 플레이스홀더)
-                ft.Container(width=16),
-                ft.Column([
-                    ft.Text(f["name"], size=13, color=TEXT, weight="bold"),
-                    ft.Text("1페이지 미리보기", size=11, color=SUBTEXT),
-                    ft.Container(height=8),
-                    ft.Row([
-                        ft.IconButton(ft.Icons.ARROW_UPWARD,   tooltip="위로", icon_color="#43A047", on_click=move_up),
-                        ft.IconButton(ft.Icons.ARROW_DOWNWARD, tooltip="아래로", icon_color="#43A047", on_click=move_down),
-                        ft.IconButton(ft.Icons.DELETE_OUTLINE,  tooltip="제거", icon_color=ACCENT, on_click=remove),
-                    ], spacing=0),
-                ], spacing=2, expand=True),                
-            ], vertical_alignment="center")
-            
-            files_col.controls.append(
-                ft.Container(row, bgcolor=CARD_BG, border_radius=10,
-                             padding=ft.padding.symmetric(10, 14),
-                             border=ft.border.all(1, BORDER))
-            )
-            
-        page.update()
 
     def load_thumb_async(slot, doc):
         """병합: 첫 페이지만 비동기 로드. page.update() 대신 slot.update()."""
@@ -526,14 +520,15 @@ def build_merge(page: ft.Page, go):
             try:
                 b64 = render_thumbnail(doc, 0)
                 doc.close()
-                slot.content = ft.Image(
-                    src_base64=b64,
-                    width=THUMB_W, height=THUMB_H,
-                    fit="contain", border_radius=6,
-                )
-                slot.bgcolor = None
-                slot.border  = ft.border.all(1, BORDER)
-                slot.update()
+                with _ui_lock:
+                    slot.content = ft.Image(
+                        src_base64=b64,
+                        width=THUMB_W, height=THUMB_H,
+                        fit="contain", border_radius=6,
+                    )
+                    slot.bgcolor = None
+                    slot.border  = ft.border.all(1, BORDER)
+                    slot.update()
             except Exception:
                 pass
         threading.Thread(target=worker, daemon=True).start()
@@ -552,7 +547,8 @@ def build_merge(page: ft.Page, go):
             # 등록 완료 후 비동기 로드
             for slot, path in new_slots:
                 load_thumb_async(slot, fitz.open(path))
-        page.update()
+        with _ui_lock:
+            page.update()
 
     file_picker = ft.FilePicker()
     file_picker.on_result = on_file_result
@@ -563,7 +559,8 @@ def build_merge(page: ft.Page, go):
         if len(files_list) < 2:
             result_text.value = "⚠️ 최소 2개 파일이 필요합니다."
             result_text.color = "#FB8C00"
-            page.update()
+            with _ui_lock:
+                page.update()
             return
         out_doc = fitz.open()
         for f in files_list:
@@ -576,7 +573,8 @@ def build_merge(page: ft.Page, go):
         out_doc.close()
         result_text.value = f"✅ 저장 완료: {out_path}"
         result_text.color = "#43A047"
-        page.update()
+        with _ui_lock:
+            page.update()
 
     return ft.Column([
         ft.Container(height=8),
@@ -618,18 +616,19 @@ def main(page: ft.Page):
     content = ft.Column(expand=True, scroll="auto")
 
     def go(route):
-        # 이전 overlay 정리 (FilePicker 중복 방지)
-        page.overlay.clear()
-        content.controls.clear()
-        if route == "home":
-            content.controls.append(build_home(page, go))
-        elif route == "rotate":
-            content.controls.append(build_rotate(page, go))
-        elif route == "reorder":
-            content.controls.append(build_reorder(page, go))
-        elif route == "merge":
-            content.controls.append(build_merge(page, go))
-        page.update()
+        with _ui_lock:
+            # 이전 overlay 정리 (FilePicker 중복 방지)
+            page.overlay.clear()
+            content.controls.clear()
+            if route == "home":
+                content.controls.append(build_home(page, go))
+            elif route == "rotate":
+                content.controls.append(build_rotate(page, go))
+            elif route == "reorder":
+                content.controls.append(build_reorder(page, go))
+            elif route == "merge":
+                content.controls.append(build_merge(page, go))
+            page.update()
 
     page.add(content)
     go("home")
